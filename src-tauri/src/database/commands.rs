@@ -245,20 +245,20 @@ pub async fn connect_to_database(
             Ok(conn) => {
                 // Apply optional session settings
                 let setup_res = (|| -> Result<(), Error> {
-                if let Some(pw) = credentials::get_password(&connection_id)? {
-                    let _ = conn.pragma_update(None, "key", &pw);
-                    let _ = conn.pragma_update(None, "cipher_compatibility", 4);
-                    let _ = conn.pragma_update(None, "cipher_page_size", 4096);
-                    let _ = conn.execute("PRAGMA cipher_memory_security = ON", []);
-                    let ck = conn
-                        .pragma_query_value(None, "cipher_integrity_check", |row| {
-                            row.get::<_, String>(0)
-                        })
-                        .unwrap_or_else(|_| String::from("error"));
-                    if ck != "ok" {
-                        return Err(Error::Any(anyhow::anyhow!("wrong key or not SQLCipher")));
+                    if let Some(pw) = credentials::get_password(&connection_id)? {
+                        let _ = conn.pragma_update(None, "key", &pw);
+                        let _ = conn.pragma_update(None, "cipher_compatibility", 4);
+                        let _ = conn.pragma_update(None, "cipher_page_size", 4096);
+                        let _ = conn.execute("PRAGMA cipher_memory_security = ON", []);
+                        let ck = conn
+                            .pragma_query_value(None, "cipher_integrity_check", |row| {
+                                row.get::<_, String>(0)
+                            })
+                            .unwrap_or_else(|_| String::from("error"));
+                        if ck != "ok" {
+                            return Err(Error::Any(anyhow::anyhow!("wrong key or not SQLCipher")));
+                        }
                     }
-                }
                     let busy = std::env::var("PGPAD_SQLITE_BUSY_TIMEOUT_MS")
                         .ok()
                         .and_then(|v| v.parse::<u64>().ok())
@@ -2687,7 +2687,10 @@ pub async fn get_sqlite_view_definitions(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::SQLite { connection: Some(conn), .. } => {
+        Database::SQLite {
+            connection: Some(conn),
+            ..
+        } => {
             let result = tauri::async_runtime::spawn_blocking({
                 let conn = conn.clone();
                 move || {
@@ -2708,7 +2711,9 @@ pub async fn get_sqlite_view_definitions(
             }).await.unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
             Ok(result)
         }
-        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        Database::SQLite {
+            connection: None, ..
+        } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
     }
 }
@@ -2726,7 +2731,10 @@ pub async fn get_sqlite_foreign_keys(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::SQLite { connection: Some(conn), .. } => {
+        Database::SQLite {
+            connection: Some(conn),
+            ..
+        } => {
             let result = tauri::async_runtime::spawn_blocking({
                 let conn = conn.clone();
                 let page = page.unwrap_or(0);
@@ -2786,7 +2794,9 @@ pub async fn get_sqlite_foreign_keys(
             }).await.unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
             Ok(result)
         }
-        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        Database::SQLite {
+            connection: None, ..
+        } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
     }
 }
@@ -3243,4 +3253,4 @@ pub async fn set_oracle_settings(
     state.storage.set_setting(&key, &s)?;
     Ok(())
 }
-                    // Notifications can be consumed by issuing LISTEN and polling via client in the UI loop if needed.
+// Notifications can be consumed by issuing LISTEN and polling via client in the UI loop if needed.
