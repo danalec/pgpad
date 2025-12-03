@@ -77,7 +77,7 @@ pub async fn update_connection(
                     ca_cert_path: new_cert,
                 },
             ) => old != new || old_cert != new_cert,
-            (Database::SQLite { db_path: old, .. }, DatabaseInfo::SQLite { db_path: new }) => {
+            (Database::SQLite { db_path: old, .. }, DatabaseInfo::SQLite { db_path: new, .. }) => {
                 old != new
             }
             (Database::DuckDB { db_path: old, .. }, DatabaseInfo::DuckDB { db_path: new }) => {
@@ -127,7 +127,7 @@ pub async fn update_connection(
                 client: None,
                 backend_pid: None,
             },
-            DatabaseInfo::SQLite { db_path } => Database::SQLite {
+            DatabaseInfo::SQLite { db_path, .. } => Database::SQLite {
                 db_path,
                 connection: None,
             },
@@ -244,7 +244,21 @@ pub async fn connect_to_database(
         } => match rusqlite::Connection::open(&db_path) {
             Ok(conn) => {
                 // Apply optional session settings
-                let _ = (|| -> Result<(), Error> {
+                let setup_res = (|| -> Result<(), Error> {
+                    if let Some(pw) = credentials::get_password(&connection_id)? {
+                        let _ = conn.pragma_update(None, "key", &pw);
+                        let _ = conn.pragma_update(None, "cipher_compatibility", 4);
+                        let _ = conn.pragma_update(None, "cipher_page_size", 4096);
+                        let _ = conn.execute("PRAGMA cipher_memory_security = ON", []);
+                        let ck = conn
+                            .pragma_query_value(None, "cipher_integrity_check", |row| row.get::<_, String>(0))
+                            .unwrap_or_else(|_| String::from("error"));
+                        if ck != "ok" {
+                            return Err(Error::Any(anyhow::anyhow!(
+                                "wrong key or not SQLCipher"
+                            )));
+                        }
+                    }
                     let busy = std::env::var("PGPAD_SQLITE_BUSY_TIMEOUT_MS")
                         .ok()
                         .and_then(|v| v.parse::<u64>().ok())
@@ -268,6 +282,11 @@ pub async fn connect_to_database(
                     }
                     Ok(())
                 })();
+                if let Err(e) = setup_res {
+                    log::error!("SQLite setup failed: {}", e);
+                    connection.connected = false;
+                    return Ok(false);
+                }
                 *sqlite_conn = Some(Arc::new(Mutex::new(conn)));
                 connection.connected = true;
 
@@ -412,6 +431,7 @@ pub async fn connect_to_database(
     }
 }
 
+#[allow(dead_code)]
 fn is_valid_pg_identifier(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.is_empty() { return false; }
@@ -422,6 +442,7 @@ fn is_valid_pg_identifier(name: &str) -> bool {
     true
 }
 
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn listen_postgres(
     connection_id: Uuid,
@@ -447,6 +468,7 @@ pub async fn listen_postgres(
     }
 }
 
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn unlisten_postgres(
     connection_id: Uuid,
@@ -733,6 +755,7 @@ pub async fn cancel_query(query_id: usize, state: tauri::State<'_, AppState>) ->
     state.stmt_manager.cancel_query(query_id)
 }
 
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn cancel_postgres(
     connection_id: Uuid,
@@ -783,6 +806,7 @@ pub async fn cancel_postgres(
     }
 }
 
+#[allow(dead_code)]
 #[tauri::command]
 pub async fn terminate_postgres(
     connection_id: Uuid,
@@ -891,8 +915,22 @@ pub async fn test_connection(
                 }
             }
         }
-        DatabaseInfo::SQLite { db_path } => match rusqlite::Connection::open(db_path) {
-            Ok(_) => Ok(true),
+        DatabaseInfo::SQLite { db_path, passphrase } => match rusqlite::Connection::open(db_path) {
+            Ok(conn) => {
+                if let Some(pw) = passphrase.as_ref() {
+                    let _ = conn.pragma_update(None, "key", pw);
+                    let _ = conn.pragma_update(None, "cipher_compatibility", 4);
+                    let _ = conn.pragma_update(None, "cipher_page_size", 4096);
+                    let _ = conn.execute("PRAGMA cipher_memory_security = ON", []);
+                    let ck = conn
+                        .pragma_query_value(None, "cipher_integrity_check", |row| row.get::<_, String>(0))
+                        .unwrap_or_else(|_| String::from("error"));
+                    if ck != "ok" {
+                        return Ok(false);
+                    }
+                }
+                Ok(true)
+            },
             Err(e) => {
                 log::error!("SQLite connection test failed: {}", e);
                 Ok(false)
@@ -1184,6 +1222,39 @@ pub async fn save_session_state(
 pub async fn get_session_state(state: tauri::State<'_, AppState>) -> Result<Option<String>, Error> {
     let session_data = state.storage.get_setting("session_state")?;
     Ok(session_data)
+}
+
+#[tauri::command]
+pub async fn get_encryption_settings(state: tauri::State<'_, AppState>) -> Result<String, Error> {
+    let enabled = state
+        .storage
+        .get_setting("encryption_enabled")?
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(true);
+    let key_storage = state
+        .storage
+        .get_setting("encryption_key_storage")?
+        .unwrap_or_else(|| String::from("keychain"));
+    let payload = serde_json::json!({
+        "enabled": enabled,
+        "key_storage": key_storage
+    });
+    Ok(payload.to_string())
+}
+
+#[tauri::command]
+pub async fn set_encryption_settings(
+    enabled: bool,
+    key_storage: String,
+    state: tauri::State<'_, AppState>,
+) -> Result<(), Error> {
+    state
+        .storage
+        .set_setting("encryption_enabled", if enabled { "1" } else { "0" })?;
+    state
+        .storage
+        .set_setting("encryption_key_storage", &key_storage)?;
+    Ok(())
 }
 
 #[tauri::command]
