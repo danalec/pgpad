@@ -812,9 +812,7 @@ pub async fn cancel_postgres(
             .await
             {
                 Ok((client, _)) => {
-                    let _ = client
-                        .execute("SELECT pg_cancel_backend($1)", &[pid])
-                        .await;
+                    let _ = client.execute("SELECT pg_cancel_backend($1)", &[pid]).await;
                     Ok(())
                 }
                 Err(e) => Err(Error::Any(anyhow::anyhow!(format!(
@@ -2105,7 +2103,10 @@ pub async fn get_postgres_view_definitions(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::Postgres { client: Some(client), .. } => {
+        Database::Postgres {
+            client: Some(client),
+            ..
+        } => {
             let sql = r#"
                 SELECT n.nspname AS schema_name,
                        c.relname AS view_name,
@@ -2121,11 +2122,16 @@ pub async fn get_postgres_view_definitions(
                 let schema_name: &str = row.get(0);
                 let view_name: &str = row.get(1);
                 let definition: &str = row.get(2);
-                map.insert(format!("{}.{}", schema_name, view_name), serde_json::Value::String(definition.to_string()));
+                map.insert(
+                    format!("{}.{}", schema_name, view_name),
+                    serde_json::Value::String(definition.to_string()),
+                );
             }
             Ok(serde_json::Value::Object(map).to_string())
         }
-        Database::Postgres { client: None, .. } => Err(Error::Any(anyhow::anyhow!("Postgres connection not active"))),
+        Database::Postgres { client: None, .. } => Err(Error::Any(anyhow::anyhow!(
+            "Postgres connection not active"
+        ))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not Postgres"))),
     }
 }
@@ -2223,7 +2229,10 @@ pub async fn get_sqlite_indexes(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::SQLite { connection: Some(conn), .. } => {
+        Database::SQLite {
+            connection: Some(conn),
+            ..
+        } => {
             let result = tauri::async_runtime::spawn_blocking({
                 let conn = conn.clone();
                 let page = page.unwrap_or(0);
@@ -2277,7 +2286,9 @@ pub async fn get_sqlite_indexes(
             }).await.unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
             Ok(result)
         }
-        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        Database::SQLite {
+            connection: None, ..
+        } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
     }
 }
@@ -2295,7 +2306,10 @@ pub async fn get_sqlite_index_columns(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::SQLite { connection: Some(conn), .. } => {
+        Database::SQLite {
+            connection: Some(conn),
+            ..
+        } => {
             let result = tauri::async_runtime::spawn_blocking({
                 let conn = conn.clone();
                 let page = page.unwrap_or(0);
@@ -2356,7 +2370,9 @@ pub async fn get_sqlite_index_columns(
             }).await.unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
             Ok(result)
         }
-        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        Database::SQLite {
+            connection: None, ..
+        } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
     }
 }
@@ -2374,7 +2390,10 @@ pub async fn get_sqlite_constraints(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::SQLite { connection: Some(conn), .. } => {
+        Database::SQLite {
+            connection: Some(conn),
+            ..
+        } => {
             let result = tauri::async_runtime::spawn_blocking({
                 let conn = conn.clone();
                 let page = page.unwrap_or(0);
@@ -2517,7 +2536,9 @@ pub async fn get_sqlite_constraints(
             .unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
             Ok(result)
         }
-        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        Database::SQLite {
+            connection: None, ..
+        } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
     }
 }
@@ -2535,7 +2556,10 @@ pub async fn get_sqlite_triggers(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::SQLite { connection: Some(conn), .. } => {
+        Database::SQLite {
+            connection: Some(conn),
+            ..
+        } => {
             let result = tauri::async_runtime::spawn_blocking({
                 let conn = conn.clone();
                 let page = page.unwrap_or(0);
@@ -2577,7 +2601,9 @@ pub async fn get_sqlite_triggers(
             }).await.unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
             Ok(result)
         }
-        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        Database::SQLite {
+            connection: None, ..
+        } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
     }
 }
@@ -2607,7 +2633,10 @@ pub async fn get_sqlite_views(
         .with_context(|| format!("Connection not found: {}", connection_id))?;
     let connection = connection_entry.value();
     match &connection.database {
-        Database::SQLite { connection: Some(conn), .. } => {
+        Database::SQLite {
+            connection: Some(conn),
+            ..
+        } => {
             let result = tauri::async_runtime::spawn_blocking({
                 let conn = conn.clone();
                 let page = page.unwrap_or(0);
@@ -2638,7 +2667,9 @@ pub async fn get_sqlite_views(
             }).await.unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
             Ok(result)
         }
-        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        Database::SQLite {
+            connection: None, ..
+        } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
         _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
     }
 }
