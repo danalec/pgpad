@@ -1593,6 +1593,16 @@ pub async fn get_postgres_triggers(
 }
 
 #[tauri::command]
+pub async fn get_postgres_routines(
+    _connection_id: Uuid,
+    _page: Option<usize>,
+    _page_size: Option<usize>,
+    _state: tauri::State<'_, AppState>,
+) -> Result<String, Error> {
+    Ok("[]".into())
+}
+
+#[tauri::command]
 pub async fn get_postgres_views(
     connection_id: Uuid,
     page: Option<usize>,
