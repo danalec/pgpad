@@ -1298,16 +1298,88 @@ pub async fn get_postgres_indexes(
 }
 
 #[tauri::command]
-#[tauri::command]
 pub async fn get_postgres_index_columns(
-    _connection_id: Uuid,
-    _page: Option<usize>,
-    _page_size: Option<usize>,
-    _state: tauri::State<'_, AppState>,
+    connection_id: Uuid,
+    page: Option<usize>,
+    page_size: Option<usize>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<String, Error> {
-    Ok("[]".into())
+    let connection_entry = state
+        .connections
+        .get(&connection_id)
+        .with_context(|| format!("Connection not found: {}", connection_id))?;
+    let connection = connection_entry.value();
+    match &connection.database {
+        Database::Postgres { client: Some(client), .. } => {
+            let page = page.unwrap_or(0);
+            let page_size = page_size.unwrap_or(100);
+            let count_sql = r#"
+                SELECT COUNT(*)
+                FROM pg_index ix
+                JOIN pg_class i ON i.oid = ix.indexrelid
+                JOIN pg_class t ON t.oid = ix.indrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON TRUE
+                WHERE t.relkind IN ('r','m','p')
+            "#;
+            let total_rows: i64 = client
+                .query_one(count_sql, &[])
+                .await
+                .map(|r| r.get::<usize, i64>(0))
+                .unwrap_or(0);
+            let total_pages = if page_size == 0 { 0 } else { (total_rows + page_size as i64 - 1) / page_size as i64 };
+            let offset = (page as i64) * (page_size as i64);
+            let list_sql = r#"
+                SELECT n.nspname AS schema_name,
+                       t.relname AS table_name,
+                       i.relname AS index_name,
+                       a.attname AS column_name,
+                       k.n AS column_position,
+                       ((ix.indoption[k.n-1] & 1) = 1) AS is_desc
+                FROM pg_index ix
+                JOIN pg_class i ON i.oid = ix.indexrelid
+                JOIN pg_class t ON t.oid = ix.indrelid
+                JOIN pg_namespace n ON n.oid = t.relnamespace
+                JOIN LATERAL unnest(ix.indkey) WITH ORDINALITY AS k(attnum, n) ON TRUE
+                LEFT JOIN pg_attribute a ON a.attrelid = t.oid AND a.attnum = k.attnum
+                WHERE t.relkind IN ('r','m','p')
+                ORDER BY n.nspname, t.relname, i.relname, k.n
+                LIMIT $1 OFFSET $2
+            "#;
+            let rows = client
+                .query(list_sql, &[&(page_size as i64), &offset])
+                .await
+                .unwrap_or_default();
+            let mut data: Vec<serde_json::Value> = Vec::with_capacity(rows.len());
+            for row in rows {
+                let schema_name: &str = row.get(0);
+                let table_name: &str = row.get(1);
+                let index_name: &str = row.get(2);
+                let column_name: Option<&str> = row.get(3);
+                let column_position: i64 = row.get(4);
+                let is_desc: bool = row.get(5);
+                data.push(serde_json::json!({
+                    "schema_name": schema_name,
+                    "table_name": table_name,
+                    "index_name": index_name,
+                    "column_name": column_name.unwrap_or("") ,
+                    "column_position": column_position,
+                    "is_desc": is_desc
+                }));
+            }
+            let payload = serde_json::json!({
+                "data": data,
+                "total_pages": total_pages,
+                "current_page": page
+            });
+            Ok(payload.to_string())
+        }
+        Database::Postgres { client: None, .. } => Err(Error::Any(anyhow::anyhow!("Postgres connection not active"))),
+        _ => Err(Error::Any(anyhow::anyhow!("Connection is not Postgres"))),
+    }
 }
 
+#[tauri::command]
 #[tauri::command]
 pub async fn get_postgres_constraints(
     _connection_id: Uuid,
