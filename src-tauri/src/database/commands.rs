@@ -2319,6 +2319,65 @@ pub async fn get_sqlite_constraints(
     }
 }
 
+#[tauri::command]
+pub async fn get_sqlite_triggers(
+    connection_id: Uuid,
+    page: Option<usize>,
+    page_size: Option<usize>,
+    state: tauri::State<'_, AppState>,
+) -> Result<String, Error> {
+    let connection_entry = state
+        .connections
+        .get(&connection_id)
+        .with_context(|| format!("Connection not found: {}", connection_id))?;
+    let connection = connection_entry.value();
+    match &connection.database {
+        Database::SQLite { connection: Some(conn), .. } => {
+            let result = tauri::async_runtime::spawn_blocking({
+                let conn = conn.clone();
+                let page = page.unwrap_or(0);
+                let page_size = page_size.unwrap_or(50);
+                move || {
+                    use rusqlite::Connection;
+                    let mut data: Vec<serde_json::Value> = Vec::new();
+                    let c: std::sync::MutexGuard<Connection> = conn.lock().map_err(|_| Error::Any(anyhow::anyhow!("SQLite connection mutex poisoned")))?;
+                    let mut stmt = c
+                        .prepare("SELECT name, tbl_name, sql FROM sqlite_master WHERE type='trigger' AND name NOT LIKE 'sqlite_%' ORDER BY name")
+                        .map_err(|e| Error::Any(anyhow::anyhow!(e.to_string())))?;
+                    let mut rows = stmt.query([]).map_err(|e| Error::Any(anyhow::anyhow!(e.to_string())))?;
+                    let mut all: Vec<(String, String, String)> = Vec::new();
+                    while let Some(row) = rows.next().map_err(|e| Error::Any(anyhow::anyhow!(e.to_string())))? {
+                        let name: String = row.get(0).map_err(|e| Error::Any(anyhow::anyhow!(e.to_string())))?;
+                        let tbl: String = row.get(1).map_err(|e| Error::Any(anyhow::anyhow!(e.to_string())))?;
+                        let sql: String = row.get(2).map_err(|e| Error::Any(anyhow::anyhow!(e.to_string())))?;
+                        all.push((name, tbl, sql));
+                    }
+                    let total_rows = all.len() as i64;
+                    let start = (page as i64) * (page_size as i64);
+                    let end = (start + page_size as i64).min(total_rows);
+                    for (name, tbl, sql) in all.into_iter().skip(start as usize).take((end - start) as usize) {
+                        data.push(serde_json::json!({
+                            "schema_name": "main",
+                            "table_name": tbl,
+                            "trigger_name": name,
+                            "definition": sql,
+                        }));
+                    }
+                    let total_pages = if page_size == 0 { 0 } else { (total_rows + page_size as i64 - 1) / page_size as i64 };
+                    let payload = serde_json::json!({
+                        "data": data,
+                        "total_pages": total_pages,
+                        "current_page": page
+                    });
+                    Ok::<String, Error>(payload.to_string())
+                }
+            }).await.unwrap_or_else(|e| Err(Error::Any(anyhow::anyhow!(format!("Join error: {}", e)))))?;
+            Ok(result)
+        }
+        Database::SQLite { connection: None, .. } => Err(Error::Any(anyhow::anyhow!("SQLite connection not active"))),
+        _ => Err(Error::Any(anyhow::anyhow!("Connection is not SQLite"))),
+    }
+}
 
 #[tauri::command]
 pub async fn get_sqlite_routines(
