@@ -1,6 +1,6 @@
 pub mod connect;
 pub mod execute;
-pub mod parser;
-pub mod schema;
-mod row_writer;
 mod numeric;
+pub mod parser;
+mod row_writer;
+pub mod schema;
