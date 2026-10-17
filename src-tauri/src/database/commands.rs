@@ -1653,16 +1653,44 @@ pub async fn get_postgres_views(
 }
 
 #[tauri::command]
-#[tauri::command]
 pub async fn get_postgres_view_definitions(
-    _connection_id: Uuid,
+    connection_id: Uuid,
     _page: Option<usize>,
     _page_size: Option<usize>,
-    _state: tauri::State<'_, AppState>,
+    state: tauri::State<'_, AppState>,
 ) -> Result<String, Error> {
-    Ok("[]".into())
+    let connection_entry = state
+        .connections
+        .get(&connection_id)
+        .with_context(|| format!("Connection not found: {}", connection_id))?;
+    let connection = connection_entry.value();
+    match &connection.database {
+        Database::Postgres { client: Some(client), .. } => {
+            let sql = r#"
+                SELECT n.nspname AS schema_name,
+                       c.relname AS view_name,
+                       pg_get_viewdef(c.oid) AS definition
+                FROM pg_class c
+                JOIN pg_namespace n ON n.oid = c.relnamespace
+                WHERE c.relkind = 'v' AND n.nspname NOT IN ('pg_catalog','information_schema')
+                ORDER BY n.nspname, c.relname
+            "#;
+            let rows = client.query(sql, &[]).await.unwrap_or_default();
+            let mut map = serde_json::Map::new();
+            for row in rows {
+                let schema_name: &str = row.get(0);
+                let view_name: &str = row.get(1);
+                let definition: &str = row.get(2);
+                map.insert(format!("{}.{}", schema_name, view_name), serde_json::Value::String(definition.to_string()));
+            }
+            Ok(serde_json::Value::Object(map).to_string())
+        }
+        Database::Postgres { client: None, .. } => Err(Error::Any(anyhow::anyhow!("Postgres connection not active"))),
+        _ => Err(Error::Any(anyhow::anyhow!("Connection is not Postgres"))),
+    }
 }
 
+#[tauri::command]
 #[tauri::command]
 pub async fn get_postgres_foreign_keys(
     _connection_id: Uuid,
