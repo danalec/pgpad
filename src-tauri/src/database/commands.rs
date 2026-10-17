@@ -759,6 +759,56 @@ pub async fn cancel_postgres(
 }
 
 #[tauri::command]
+pub async fn terminate_postgres(
+    connection_id: Uuid,
+    state: tauri::State<'_, AppState>,
+    certificates: tauri::State<'_, Certificates>,
+) -> Result<(), Error> {
+    let connection_entry = state
+        .connections
+        .get(&connection_id)
+        .with_context(|| format!("Connection not found: {}", connection_id))?;
+    let connection = connection_entry.value();
+    match &connection.database {
+        Database::Postgres {
+            connection_string,
+            ca_cert_path,
+            backend_pid: Some(pid),
+            ..
+        } => {
+            let mut cfg: tokio_postgres::Config = connection_string
+                .parse()
+                .with_context(|| format!("Failed to parse connection string: {}", connection_string))?;
+            if cfg.get_password().is_none() {
+                if let Some(pw) = crate::credentials::get_password(&connection_id)? {
+                    cfg.password(pw);
+                }
+            }
+            match crate::database::postgres::connect::connect(
+                &cfg,
+                &certificates,
+                ca_cert_path.as_deref(),
+            )
+            .await
+            {
+                Ok((client, _)) => {
+                    let _ = client.execute("SELECT pg_terminate_backend($1)", &[pid]).await;
+                    Ok(())
+                }
+                Err(e) => Err(Error::Any(anyhow::anyhow!(format!(
+                    "Failed to connect for termination: {}",
+                    e
+                )))),
+            }
+        }
+        Database::Postgres { backend_pid: None, .. } => Err(Error::Any(anyhow::anyhow!(
+            "Postgres backend PID not recorded"
+        ))),
+        _ => Err(Error::Any(anyhow::anyhow!("Connection is not Postgres"))),
+    }
+}
+
+#[tauri::command]
 pub async fn get_connections(
     state: tauri::State<'_, AppState>,
 ) -> Result<Vec<ConnectionInfo>, Error> {
@@ -1719,14 +1769,6 @@ pub async fn get_postgres_triggers(
 }
 
 #[tauri::command]
-pub async fn get_postgres_routines(
-    _connection_id: Uuid,
-    _page: Option<usize>,
-    _page_size: Option<usize>,
-    _state: tauri::State<'_, AppState>,
-) -> Result<String, Error> {
-    Ok("[]".into())
-}
 
 #[tauri::command]
 pub async fn get_postgres_views(
