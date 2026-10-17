@@ -76,8 +76,8 @@ pub async fn update_connection(
                 },
             ) => old != new || old_cert != new_cert,
             (
-                ConnectionConfig::SQLite { db_path: old },
-                ConnectionConfig::SQLite { db_path: new },
+                ConnectionConfig::SQLite { db_path: old, .. },
+                ConnectionConfig::SQLite { db_path: new, .. },
             ) => old != new,
             _ => true,
         };
@@ -167,35 +167,40 @@ pub async fn connect_to_database(
                 }
             }
         }
-        ConnectionConfig::SQLite { db_path } => match rusqlite::Connection::open(db_path) {
-            Ok(conn) => {
-                // Set busy timeout so concurrent writers wait instead of
-                // immediately returning SQLITE_BUSY.
-                if let Err(e) = conn.execute_batch("PRAGMA busy_timeout = 5000;") {
-                    log::error!(
-                        "Failed to set busy_timeout on SQLite database {}: {}",
-                        db_path,
-                        e
-                    );
+        ConnectionConfig::SQLite { db_path, .. } => {
+            // The passphrase was stripped from the stored config and lives in
+            // the keyring, exactly like a Postgres password.
+            let passphrase = credentials::get_password(&connection_id)?;
+            match sqlite::connect::open(db_path, passphrase.as_deref()) {
+                Ok(conn) => {
+                    // Set busy timeout so concurrent writers wait instead of
+                    // immediately returning SQLITE_BUSY.
+                    if let Err(e) = conn.execute_batch("PRAGMA busy_timeout = 5000;") {
+                        log::error!(
+                            "Failed to set busy_timeout on SQLite database {}: {}",
+                            db_path,
+                            e
+                        );
+                    }
+
+                    connection.runtime = ConnectionRuntime::Connected(RuntimeClient::SQLite {
+                        connection: Arc::new(Mutex::new(conn)),
+                    });
+
+                    if let Err(e) = state.storage.update_last_connected(&connection_id) {
+                        log::warn!("Failed to update last connected timestamp: {}", e);
+                    }
+
+                    log::info!("Successfully connected to SQLite database: {}", db_path);
+                    Ok(true)
                 }
-
-                connection.runtime = ConnectionRuntime::Connected(RuntimeClient::SQLite {
-                    connection: Arc::new(Mutex::new(conn)),
-                });
-
-                if let Err(e) = state.storage.update_last_connected(&connection_id) {
-                    log::warn!("Failed to update last connected timestamp: {}", e);
+                Err(e) => {
+                    log::error!("Failed to connect to SQLite database {}: {}", db_path, e);
+                    connection.runtime = ConnectionRuntime::Disconnected;
+                    Ok(false)
                 }
-
-                log::info!("Successfully connected to SQLite database: {}", db_path);
-                Ok(true)
             }
-            Err(e) => {
-                log::error!("Failed to connect to SQLite database {}: {}", db_path, e);
-                connection.runtime = ConnectionRuntime::Disconnected;
-                Ok(false)
-            }
-        },
+        }
     }
 }
 
@@ -316,7 +321,10 @@ pub async fn test_connection(
                 }
             }
         }
-        ConnectionConfig::SQLite { db_path } => match rusqlite::Connection::open(db_path) {
+        ConnectionConfig::SQLite {
+            db_path,
+            passphrase,
+        } => match sqlite::connect::open(&db_path, passphrase.as_deref()) {
             Ok(_) => Ok(true),
             Err(e) => {
                 log::error!("SQLite connection test failed: {}", e);
