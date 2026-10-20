@@ -14,7 +14,7 @@ use dashmap::DashMap;
 
 use crate::{
     database::{
-        mssql,
+        mssql, oracle,
         parser::ParsedStatement,
         postgres, sqlite,
         types::{channel, Page, QueryEvent, QueryId, QuerySnapshot, QueryStatus, RuntimeClient},
@@ -258,7 +258,10 @@ impl StatementManager {
         let parse_statements = match &client {
             RuntimeClient::Postgres { .. } => postgres::parser::parse_statements,
             RuntimeClient::SQLite { .. } => sqlite::parser::parse_statements,
+
             RuntimeClient::Mssql { .. } => mssql::parser::parse_statements,
+
+            RuntimeClient::Oracle { .. } => oracle::parser::parse_statements,
         };
 
         let statements = parse_statements(query)?;
@@ -347,10 +350,17 @@ impl StatementManager {
                     log::error!("Error executing SQLite query: {}", err);
                 }
             }),
+
             RuntimeClient::Mssql { client } => task::spawn(async move {
                 let mut client = client.lock().await;
                 if let Err(err) = mssql::execute::execute_query(&mut client, stmt, &sender).await {
                     log::error!("Error executing MSSQL query: {}", err);
+                }
+            }),
+            RuntimeClient::Oracle { connection } => task::spawn_blocking(move || {
+                let conn = connection.lock().unwrap();
+                if let Err(err) = oracle::execute::execute_query(&conn, stmt, &sender) {
+                    log::error!("Error executing Oracle query: {}", err);
                 }
             }),
         };

@@ -57,7 +57,10 @@ pub enum QueryEvent {
 pub enum Database {
     Postgres,
     Sqlite,
+
     Mssql,
+
+    Oracle,
 }
 
 #[repr(u8)]
@@ -125,9 +128,13 @@ pub enum ConnectionConfig {
     SQLite {
         db_path: String,
     },
+
     Mssql {
         connection_string: String,
         ca_cert_path: Option<String>,
+    },
+    Oracle {
+        connection_string: String,
     },
 }
 
@@ -148,12 +155,16 @@ pub enum RuntimeClient {
     SQLite {
         connection: Arc<Mutex<rusqlite::Connection>>,
     },
+
     Mssql {
         /// The driver is asynchronous, so the client is held behind an async
         /// mutex: a `std` one would make the guard `!Send` and the executor
         /// could not be spawned.
         client:
             Arc<tokio::sync::Mutex<tiberius::Client<crate::database::mssql::connect::MssqlStream>>>,
+    },
+    Oracle {
+        connection: Arc<Mutex<oracle::Connection>>,
     },
 }
 
@@ -168,7 +179,10 @@ impl ConnectionConfig {
         match self {
             ConnectionConfig::Postgres { .. } => Database::Postgres,
             ConnectionConfig::SQLite { .. } => Database::Sqlite,
+
             ConnectionConfig::Mssql { .. } => Database::Mssql,
+
+            ConnectionConfig::Oracle { .. } => Database::Oracle,
         }
     }
 }
@@ -211,9 +225,15 @@ impl Connection {
                     connection: connection.clone(),
                 }
             }
+
             ConnectionRuntime::Connected(RuntimeClient::Mssql { client }) => RuntimeClient::Mssql {
                 client: client.clone(),
             },
+            ConnectionRuntime::Connected(RuntimeClient::Oracle { connection }) => {
+                RuntimeClient::Oracle {
+                    connection: connection.clone(),
+                }
+            }
             ConnectionRuntime::Disconnected => {
                 return Err(Error::Any(anyhow::anyhow!("Connection not active")));
             }

@@ -8,6 +8,7 @@
 	import type { SvelteSet } from 'svelte/reactivity';
 	import IconCibPostgresql from '~icons/cib/postgresql';
 	import IconSimpleIconsSqlite from '~icons/simple-icons/sqlite';
+	import IconSimpleIconsOracle from '~icons/simple-icons/oracle';
 	import IconSimpleIconsMssql from '~icons/simple-icons/microsoftsqlserver';
 	import Button from './ui/button/button.svelte';
 
@@ -204,6 +205,8 @@
 								<IconSimpleIconsSqlite class="h-4 w-4" />
 							{:else if 'Mssql' in connection.config}
 								<IconSimpleIconsMssql class="h-4 w-4" />
+							{:else if 'Oracle' in connection.config}
+								<IconSimpleIconsOracle class="h-4 w-4" />
 							{/if}
 						</div>
 						<div class="text-foreground truncate text-sm font-medium">
@@ -218,6 +221,8 @@
 								{:else if 'SQLite' in connection.config}
 									{connection.config.SQLite.db_path.split('/').pop() ||
 										connection.config.SQLite.db_path}
+								{:else if 'Oracle' in connection.config}
+									{connection.config.Oracle.connection_string.replace(/^oracle:\/\/[^@]*@/, '')}
 								{:else if 'Mssql' in connection.config}
 									{connection.config.Mssql.connection_string.replace(/^sqlserver:\/\/[^@]*@/, '')}
 								{/if}
