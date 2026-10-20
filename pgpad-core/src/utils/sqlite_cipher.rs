@@ -15,7 +15,7 @@ fn exec_ignore_result(conn: &Connection, sql: &str, params: &[&dyn ToSql]) -> an
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub struct CipherSettings {
     pub kdf_iter: Option<u32>,
     pub page_size: Option<u32>,
@@ -42,79 +42,68 @@ pub fn apply_cipher_settings_with(
     // Disable memory security early to avoid NOMEM on some environments
     exec_ignore_result(conn, "PRAGMA cipher_memory_security = OFF", &[])?;
 
-    let kdf = cfg.kdf_iter.unwrap_or(256000);
-    let use_hmac = cfg.use_hmac.unwrap_or(true);
+    let resolved = ResolvedCipher::from(cfg);
     if strict {
-        if kdf < min_kdf {
+        if resolved.kdf < min_kdf {
             anyhow::bail!(
                 "kdf_iter {} below minimum {} under strict policy",
-                kdf,
+                resolved.kdf,
                 min_kdf
             );
         }
-        if !use_hmac {
+        if !resolved.use_hmac {
             anyhow::bail!("cipher_use_hmac must be ON under strict policy");
         }
     }
-    let compat = cfg.compatibility.unwrap_or(4);
-    exec_ignore_result(
-        conn,
-        &format!("PRAGMA cipher_compatibility = {}", compat),
-        &[],
-    )?;
-    let page = cfg.page_size.unwrap_or(4096);
-    exec_ignore_result(conn, &format!("PRAGMA cipher_page_size = {}", page), &[])?;
-    exec_ignore_result(conn, &format!("PRAGMA kdf_iter = {}", kdf), &[])?;
-    if use_hmac {
-        exec_ignore_result(conn, "PRAGMA cipher_use_hmac = ON", &[])?;
-    } else {
-        exec_ignore_result(conn, "PRAGMA cipher_use_hmac = OFF", &[])?;
-    }
-    if let Some(p) = cfg.plaintext_header_size {
-        exec_ignore_result(
-            conn,
-            &format!("PRAGMA cipher_plaintext_header_size = {}", p),
-            &[],
-        )?;
+    for pragma in resolved.pragmas("") {
+        exec_ignore_result(conn, &pragma, &[])?;
     }
     apply_key(conn, key)?;
     Ok(())
 }
 
-pub fn apply_cipher_defaults(conn: &Connection, cfg: &CipherSettings) -> anyhow::Result<()> {
-    // Disable memory security early
-    exec_ignore_result(conn, "PRAGMA cipher_memory_security = OFF", &[])?;
+/// The cipher parameters with their defaults resolved.
+struct ResolvedCipher {
+    kdf: u32,
+    page: u32,
+    use_hmac: bool,
+    compat: u32,
+    plaintext_header_size: Option<u32>,
+}
 
-    if let Some(v) = cfg.kdf_iter {
-        exec_ignore_result(
-            conn,
-            &format!("PRAGMA cipher_default_kdf_iter = {}", v),
-            &[],
-        )?;
-    }
-    if let Some(v) = cfg.page_size {
-        exec_ignore_result(
-            conn,
-            &format!("PRAGMA cipher_default_page_size = {}", v),
-            &[],
-        )?;
-    }
-    match cfg.use_hmac.unwrap_or(true) {
-        true => {
-            exec_ignore_result(conn, "PRAGMA cipher_default_use_hmac = ON", &[])?;
-        }
-        false => {
-            exec_ignore_result(conn, "PRAGMA cipher_default_use_hmac = OFF", &[])?;
+impl ResolvedCipher {
+    fn from(cfg: &CipherSettings) -> Self {
+        Self {
+            kdf: cfg.kdf_iter.unwrap_or(256000),
+            page: cfg.page_size.unwrap_or(4096),
+            use_hmac: cfg.use_hmac.unwrap_or(true),
+            compat: cfg.compatibility.unwrap_or(4),
+            plaintext_header_size: cfg.plaintext_header_size,
         }
     }
-    if let Some(v) = cfg.plaintext_header_size {
-        exec_ignore_result(
-            conn,
-            &format!("PRAGMA cipher_default_plaintext_header_size = {}", v),
-            &[],
-        )?;
+
+    /// The settings as `PRAGMA` statements for a single schema.
+    ///
+    /// `schema` is empty for the main database and `"cipher_db."` for an
+    /// attached one. The key is deliberately not part of this list: applying
+    /// the key is what derives it, so a setting changed after that point
+    /// re-derives the key under different parameters, and the database can no
+    /// longer be reopened with the passphrase that created it.
+    fn pragmas(&self, schema: &str) -> Vec<String> {
+        let mut pragmas = vec![
+            format!("PRAGMA {schema}cipher_compatibility = {}", self.compat),
+            format!("PRAGMA {schema}cipher_page_size = {}", self.page),
+            format!("PRAGMA {schema}kdf_iter = {}", self.kdf),
+            format!(
+                "PRAGMA {schema}cipher_use_hmac = {}",
+                if self.use_hmac { "ON" } else { "OFF" }
+            ),
+        ];
+        if let Some(p) = self.plaintext_header_size {
+            pragmas.push(format!("PRAGMA {schema}cipher_plaintext_header_size = {p}"));
+        }
+        pragmas
     }
-    Ok(())
 }
 
 fn apply_key(conn: &Connection, secret: &SecretString) -> anyhow::Result<()> {
@@ -135,7 +124,6 @@ fn apply_key(conn: &Connection, secret: &SecretString) -> anyhow::Result<()> {
     Ok(())
 }
 
-#[allow(dead_code)]
 fn apply_key_for_db(conn: &Connection, db: &str, secret: &SecretString) -> anyhow::Result<()> {
     let raw = secret.expose_secret();
     let mut s = normalize_passphrase(raw);
@@ -280,24 +268,12 @@ pub fn attach_and_export_plain_to_encrypted_with(
     cfg: &CipherSettings,
 ) -> anyhow::Result<()> {
     let path_str = new_path.display().to_string().replace("'", "''");
-    let mut pass = normalize_passphrase(key.expose_secret());
-    crate::utils::sqlite_cipher::apply_cipher_defaults(conn, cfg)?;
-    let is_raw_hex = pass.starts_with("hex:")
-        && pass[4..].len().is_multiple_of(2)
-        && pass[4..].chars().all(|c| c.is_ascii_hexdigit());
-    let attach_sql = if is_raw_hex {
-        format!(
-            "ATTACH DATABASE '{}' AS cipher_db KEY \"x'{}'\";",
-            path_str,
-            &pass[4..]
-        )
-    } else {
-        let escaped = pass.replace("'", "''");
-        format!(
-            "ATTACH DATABASE '{}' AS cipher_db KEY '{}';",
-            path_str, escaped
-        )
-    };
+    // The destination is attached without a key on purpose. The cipher settings
+    // of a new database have to be in place before the key is applied, because
+    // applying the key is what derives it. Setting them afterwards re-derives
+    // the key under different parameters, and the export is then written under
+    // a key that no longer opens the file.
+    let attach_sql = format!("ATTACH DATABASE '{}' AS cipher_db;", path_str);
     // ATTACH is the only way to write an encrypted copy with SQLCipher, so it
     // is attempted on every platform; the caller keeps the plaintext file until
     // this succeeds.
@@ -312,34 +288,18 @@ pub fn attach_and_export_plain_to_encrypted_with(
             })
             .is_ok();
         if attached_has_cipher {
-            let compat = cfg.compatibility.unwrap_or(4);
-            let page = cfg.page_size.unwrap_or(4096);
-            let kdf = cfg.kdf_iter.unwrap_or(256000);
-            let _ = conn.execute_batch(&format!(
-                "PRAGMA cipher_db.cipher_compatibility = {};
-                PRAGMA cipher_db.cipher_page_size = {};
-                PRAGMA cipher_db.kdf_iter = {};",
-                compat, page, kdf
-            ));
-            if cfg.use_hmac.unwrap_or(true) {
-                let _ = conn.execute("PRAGMA cipher_db.cipher_use_hmac = ON", []);
-            } else {
-                let _ = conn.execute("PRAGMA cipher_db.cipher_use_hmac = OFF", []);
+            // The same settings the application opens its own database with,
+            // applied to the attached schema before the key.
+            for pragma in ResolvedCipher::from(cfg).pragmas("cipher_db.") {
+                exec_ignore_result(conn, &pragma, &[])?;
             }
-            if let Some(p) = cfg.plaintext_header_size {
-                exec_ignore_result(
-                    conn,
-                    &format!("PRAGMA cipher_db.cipher_plaintext_header_size = {}", p),
-                    &[],
-                )?;
-            }
+            apply_key_for_db(conn, "cipher_db", key)?;
             conn.execute_batch("SELECT sqlcipher_export('cipher_db');")
                 .context("Failed to export to encrypted database")?;
             if cfg.vacuum_after_pagesize.unwrap_or(false) {
                 let _ = conn.execute_batch("VACUUM");
             }
             let _ = conn.execute_batch("DETACH DATABASE cipher_db;");
-            pass.zeroize();
             return Ok(());
         } else {
             let _ = conn.execute_batch("DETACH DATABASE cipher_db;");
@@ -351,7 +311,6 @@ pub fn attach_and_export_plain_to_encrypted_with(
     // The caller keeps the original database, which is still plaintext and
     // still readable, so this is recoverable rather than destructive.
     let _ = std::fs::remove_file(new_path);
-    pass.zeroize();
     anyhow::bail!(
         "SQLCipher could not attach an encrypted destination database, so the \
          existing database was left untouched and is still unencrypted"
@@ -361,4 +320,81 @@ pub fn attach_and_export_plain_to_encrypted_with(
 pub fn has_sqlcipher(conn: &Connection) -> bool {
     conn.pragma_query_value(None, "cipher_version", |row| row.get::<_, String>(0))
         .is_ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sqlcipher_available() -> bool {
+        Connection::open_in_memory()
+            .map(|conn| has_sqlcipher(&conn))
+            .unwrap_or(false)
+    }
+
+    /// The export has to produce a file the application can open again with the
+    /// same settings.
+    ///
+    /// The settings of the attached database have to be in place before its
+    /// key, because applying the key is what derives it. A non-default
+    /// compatibility or header size is what catches it: applied after the key,
+    /// they re-derive it, and the exported file then fails the HMAC check and
+    /// no longer opens.
+    #[test]
+    fn export_reopens_with_the_same_settings() -> anyhow::Result<()> {
+        if !sqlcipher_available() {
+            eprintln!("skipped: SQLCipher is not compiled in");
+            return Ok(());
+        }
+
+        let variants = [
+            CipherSettings {
+                compatibility: Some(3),
+                ..Default::default()
+            },
+            CipherSettings {
+                plaintext_header_size: Some(32),
+                ..Default::default()
+            },
+            CipherSettings {
+                compatibility: Some(3),
+                plaintext_header_size: Some(32),
+                kdf_iter: Some(300000),
+                page_size: Some(4096),
+                use_hmac: Some(true),
+                vacuum_after_pagesize: Some(false),
+            },
+        ];
+
+        for (index, cfg) in variants.iter().enumerate() {
+            let dir = std::env::temp_dir().join(format!("pgpad-cipher-export-{}", index));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
+            let src_path = dir.join("plain.db");
+            let out_path = dir.join("out.db");
+
+            {
+                let conn = Connection::open(&src_path)?;
+                conn.execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (42);")?;
+            }
+
+            let key = SecretString::new(hex::encode([11u8; 32]));
+
+            {
+                let conn = Connection::open(&src_path)?;
+                attach_and_export_plain_to_encrypted_with(&conn, &out_path, &key, cfg)?;
+            }
+
+            // Reopen exactly the way the application opens its own database.
+            let conn = Connection::open(&out_path)?;
+            apply_cipher_settings_with(&conn, &key, cfg)?;
+            verify_cipher_ok(&conn)?;
+            let value: i64 = conn.query_row("SELECT a FROM t", [], |row| row.get(0))?;
+            assert_eq!(value, 42, "variant {} lost the row", index);
+            drop(conn);
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        Ok(())
+    }
 }

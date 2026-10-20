@@ -255,12 +255,11 @@ impl Storage {
     fn open_encrypted_with_key(
         db_path: &PathBuf,
         key: &SecretString,
+        cfg: &crate::utils::sqlite_cipher::CipherSettings,
     ) -> anyhow::Result<Connection> {
         let conn = Connection::open(db_path)
             .with_context(|| format!("Failed to open SQLite database at {}", db_path.display()))?;
-        let cfg = Self::env_cipher_settings();
-        let _ = crate::utils::sqlite_cipher::apply_cipher_defaults(&conn, &cfg);
-        crate::utils::sqlite_cipher::apply_cipher_settings_with(&conn, key, &cfg)?;
+        crate::utils::sqlite_cipher::apply_cipher_settings_with(&conn, key, cfg)?;
         let common = Self::settings_common_pragmas();
         crate::utils::sqlite_cipher::apply_common_settings_with(&conn, &common)?;
         Ok(conn)
@@ -313,7 +312,8 @@ impl Storage {
         let encrypted = exists && Self::is_encrypted(db_path);
 
         if !exists || encrypted {
-            let conn = Self::open_encrypted_with_key(db_path, key)?;
+            let cfg = Self::env_cipher_settings();
+            let conn = Self::open_encrypted_with_key(db_path, key, &cfg)?;
             if encrypted {
                 // Guards against a keyring that no longer holds this app's key.
                 crate::utils::sqlite_cipher::verify_cipher_ok(&conn)
@@ -344,7 +344,7 @@ impl Storage {
         std::fs::rename(db_path, &backup_path)?;
         std::fs::rename(&new_path, db_path)?;
 
-        let enc_conn = Self::open_encrypted_with_key(db_path, key)?;
+        let enc_conn = Self::open_encrypted_with_key(db_path, key, &cfg)?;
         crate::utils::sqlite_cipher::verify_cipher_ok(&enc_conn)?;
 
         // `sqlcipher_export` copies the schema and the rows but not the
@@ -885,6 +885,72 @@ mod tests {
         drop(conn);
 
         let _ = std::fs::remove_dir_all(&dir);
+        Ok(())
+    }
+
+    /// A database created from scratch has to be created with the configured
+    /// cipher parameters and reopen with the same ones.
+    ///
+    /// The settings are per database, so applying the `cipher_default_*`
+    /// pragmas to an existing database changes the parameters it was created
+    /// with and makes it fail to decrypt.
+    #[test]
+    fn new_database_uses_the_configured_settings() -> anyhow::Result<()> {
+        if !sqlcipher_available() {
+            eprintln!("skipped: SQLCipher is not compiled in");
+            return Ok(());
+        }
+
+        let variants = [
+            crate::utils::sqlite_cipher::CipherSettings {
+                kdf_iter: Some(300000),
+                page_size: Some(4096),
+                use_hmac: Some(true),
+                plaintext_header_size: None,
+                compatibility: Some(3),
+                vacuum_after_pagesize: Some(false),
+            },
+            crate::utils::sqlite_cipher::CipherSettings {
+                kdf_iter: Some(300000),
+                page_size: Some(8192),
+                use_hmac: Some(true),
+                plaintext_header_size: None,
+                compatibility: Some(4),
+                vacuum_after_pagesize: Some(false),
+            },
+        ];
+
+        for (index, cfg) in variants.iter().enumerate() {
+            let dir = std::env::temp_dir().join(format!("pgpad-storage-new-settings-{}", index));
+            let _ = std::fs::remove_dir_all(&dir);
+            std::fs::create_dir_all(&dir)?;
+            let db_path = dir.join("pgpad.db");
+            let key = test_key();
+
+            {
+                let conn = Storage::open_encrypted_with_key(&db_path, &key, cfg)?;
+                // The first write is what creates the header, so the database
+                // can only be read back after it.
+                conn.execute_batch("CREATE TABLE t (a INTEGER); INSERT INTO t VALUES (5);")?;
+                crate::utils::sqlite_cipher::verify_cipher_ok(&conn)?;
+            }
+
+            // Reopening with the same settings has to work.
+            {
+                let conn = Storage::open_encrypted_with_key(&db_path, &key, cfg)?;
+                crate::utils::sqlite_cipher::verify_cipher_ok(&conn)?;
+                let value: i64 = conn.query_row("SELECT a FROM t", [], |row| row.get(0))?;
+                assert_eq!(value, 5, "variant {} lost the row", index);
+            }
+
+            // A different key must not be able to read it. Opening alone does
+            // not tell, because the key is only exercised on the first read.
+            let other = SecretString::new(hex::encode([9u8; 32]));
+            let conn = Storage::open_encrypted_with_key(&db_path, &other, cfg)?;
+            assert!(crate::utils::sqlite_cipher::verify_cipher_ok(&conn).is_err());
+
+            let _ = std::fs::remove_dir_all(&dir);
+        }
         Ok(())
     }
 }
